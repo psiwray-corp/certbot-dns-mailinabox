@@ -56,7 +56,7 @@ class Authenticator(dns_common.DNSAuthenticator):
         
         tries = 3
         while True:
-            r = post(f"https://{self.conf('host')/admin/dns/custom/{validation_name}/txt", 
+            r = post(f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt", 
                     auth=(username, password), data=validation, headers={"X-Auth-Token": TOTP(totp_secret).now()})
             
             s = r.status_code
@@ -83,7 +83,7 @@ class Authenticator(dns_common.DNSAuthenticator):
         
         tries = 3
         while True:
-            r = delete(f"https://{self.conf('host')/admin/dns/custom/{validation_name}/txt", 
+            r = delete(f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt", 
                     auth=(username, password), data=validation, headers={"X-Auth-Token": TOTP(totp_secret).now()})
         
             s = r.status_code
