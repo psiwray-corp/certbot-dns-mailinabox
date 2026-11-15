@@ -4,7 +4,8 @@ from certbot.plugins.dns_common import CredentialsConfiguration
 
 from pyotp import TOTP
 
-from requests import post, delete, codes
+from requests import codes, delete, post
+from requests.exceptions import RequestException
 
 from typing import Any
 from typing import Callable
@@ -19,6 +20,16 @@ class Authenticator(dns_common.DNSAuthenticator):
 
     description = "Mail-in-a-Box's DNS authenticator."
 
+    HTTP_TIMEOUT_SECONDS = 30
+    RETRYABLE_STATUS_CODES = frozenset({
+        codes.unauthorized,
+        codes.too_many_requests,
+        codes.internal_server_error,
+        codes.bad_gateway,
+        codes.service_unavailable,
+        codes.gateway_timeout,
+    })
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.credentials: Optional[CredentialsConfiguration] = None
@@ -30,18 +41,23 @@ class Authenticator(dns_common.DNSAuthenticator):
         add("host", help="The Mail-in-a-Box web interface host.")
 
     def more_info(self) -> str:
-        return "This plugin configures a DNS TXT record to respond to a DNS-01 challenge using " + \
-               "the Mail-in-a-Box API."
+        return ("This plugin configures a DNS TXT record to respond to a DNS-01 "
+                "challenge using the Mail-in-a-Box API.")
 
     def _setup_credentials(self) -> None:
+        if not self.conf("host"):
+            raise errors.PluginError(
+                "The Mail-in-a-Box web interface host is required. "
+                "Pass it with --dns-mailinabox-host."
+            )
         self.credentials = self._configure_credentials(
             "credentials",
             "Mail-in-a-Box credentials INI file.",
             {
                 "username": "User e-mail address",
                 "password": "User password",
-                "totp_secret": "Temporary one-time password secret for 2FA"
-            }
+                "totp_secret": "Temporary one-time password secret for 2FA",
+            },
         )
 
     def _get_credentials(self) -> CredentialsConfiguration:
@@ -50,57 +66,61 @@ class Authenticator(dns_common.DNSAuthenticator):
         return self.credentials
 
     def _perform(self, domain: str, validation_name: str, validation: str) -> None:
-        credentials = self._get_credentials()
-        username = cast(str, credentials.conf("username"))
-        password = cast(str, credentials.conf("password"))
-        totp_secret = cast(str, credentials.conf("totp_secret"))
-        
-        tries = 3
-        while True:
-            r = post(f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt", 
-                    auth=(username, password), data=validation, headers={"X-Auth-Token": TOTP(totp_secret).now()})
-            
-            s = r.status_code
-            if s == codes.ok:
-                # If the code is 200, it's all good, we can stop.
-                break
-            elif s == codes.unauthorized:
-                # If the code is 401 it could be a 2FA refresh problem so we
-                # wait up to three times before giving up.
-                tries -= 1
-                if tries == 0:
-                    r.raise_for_status()
-                else:
-                    # Sleep if we have more tries to let the system generate more codes.
-                    sleep(30.0)
-            else:
-                # Another error, bad!
-                r.raise_for_status()
-        
+        self._change_record(post, validation_name, validation)
+
     def _cleanup(self, domain: str, validation_name: str, validation: str) -> None:
+        self._change_record(delete, validation_name, validation, missing_ok=True)
+
+    def _change_record(
+        self,
+        request: Callable[..., Any],
+        validation_name: str,
+        validation: str,
+        missing_ok: bool = False,
+    ) -> None:
+        """Create or delete the TXT record, retrying transient failures."""
         credentials = self._get_credentials()
         username = cast(str, credentials.conf("username"))
         password = cast(str, credentials.conf("password"))
         totp_secret = cast(str, credentials.conf("totp_secret"))
-        
+        retry_delay = float(TOTP(totp_secret).interval)
+
+        url = f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt"
         tries = 3
-        while True:
-            r = delete(f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt", 
-                    auth=(username, password), data=validation, headers={"X-Auth-Token": TOTP(totp_secret).now()})
-        
-            s = r.status_code
-            if s == codes.ok:
-                # If the code is 200, it's all good, we can stop.
-                break
-            elif s == codes.unauthorized:
-                # If the code is 401 it could be a 2FA refresh problem so we
-                # wait up to three times before giving up.
-                tries -= 1
-                if tries == 0:
-                    r.raise_for_status()
-                else:
-                    # Sleep if we have more tries to let the system generate more codes.
-                    sleep(30.0)
-            else:
-                # Another error, bad!
-                r.raise_for_status()
+        while tries:
+            tries -= 1
+            try:
+                response = request(
+                    url,
+                    auth=(username, password),
+                    data=validation,
+                    headers={"X-Auth-Token": TOTP(totp_secret).now()},
+                    timeout=self.HTTP_TIMEOUT_SECONDS,
+                )
+            except RequestException as e:
+                # Network errors and timeouts are worth retrying.
+                if not tries:
+                    raise errors.PluginError(
+                        f"Could not reach the Mail-in-a-Box API at {url}: {e}"
+                    ) from e
+                sleep(retry_delay)
+                continue
+
+            status = response.status_code
+            if status in (codes.ok, codes.no_content):
+                return
+            if missing_ok and status == codes.not_found:
+                # Certbot's cleanup contract: a missing record is not an error.
+                return
+            if status in self.RETRYABLE_STATUS_CODES:
+                # A 401 is most likely a stale TOTP code, so wait for the next
+                # one; 429/5xx are transient server-side failures.
+                if not tries:
+                    raise errors.PluginError(
+                        f"Mail-in-a-Box API request to {url} failed with HTTP {status}."
+                    )
+                sleep(retry_delay)
+                continue
+            raise errors.PluginError(
+                f"Mail-in-a-Box API request to {url} failed with HTTP {status}."
+            )
