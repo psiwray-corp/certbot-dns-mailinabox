@@ -21,6 +21,7 @@ class Authenticator(dns_common.DNSAuthenticator):
     description = "Mail-in-a-Box's DNS authenticator."
 
     HTTP_TIMEOUT_SECONDS = 30
+    RETRY_DELAY_WITHOUT_TOTP_SECONDS = 5.0
     RETRYABLE_STATUS_CODES = frozenset({
         codes.unauthorized,
         codes.too_many_requests,
@@ -56,7 +57,6 @@ class Authenticator(dns_common.DNSAuthenticator):
             {
                 "username": "User e-mail address",
                 "password": "User password",
-                "totp_secret": "Temporary one-time password secret for 2FA",
             },
         )
 
@@ -82,19 +82,26 @@ class Authenticator(dns_common.DNSAuthenticator):
         credentials = self._get_credentials()
         username = cast(str, credentials.conf("username"))
         password = cast(str, credentials.conf("password"))
-        totp_secret = cast(str, credentials.conf("totp_secret"))
-        retry_delay = float(TOTP(totp_secret).interval)
+        totp_secret = credentials.conf("totp_secret")
+        retry_delay = (
+            float(TOTP(totp_secret).interval)
+            if totp_secret
+            else self.RETRY_DELAY_WITHOUT_TOTP_SECONDS
+        )
 
         url = f"https://{self.conf('host')}/admin/dns/custom/{validation_name}/txt"
         tries = 3
         while tries:
             tries -= 1
+            headers = {}
+            if totp_secret:
+                headers["X-Auth-Token"] = TOTP(totp_secret).now()
             try:
                 response = request(
                     url,
                     auth=(username, password),
                     data=validation,
-                    headers={"X-Auth-Token": TOTP(totp_secret).now()},
+                    headers=headers,
                     timeout=self.HTTP_TIMEOUT_SECONDS,
                 )
             except RequestException as e:
