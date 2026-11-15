@@ -1,8 +1,4 @@
-from acme import challenges
-
-from certbot import interfaces
-from certbot import achallenges
-from certbot.plugins import common
+from certbot import errors
 from certbot.plugins import dns_common
 from certbot.plugins.dns_common import CredentialsConfiguration
 
@@ -10,11 +6,10 @@ from pyotp import TOTP
 
 from requests import post, delete, codes
 
-from typing import Callable
 from typing import Any
-from typing import Iterable
-from typing import List
-from typing import Type
+from typing import Callable
+from typing import Optional
+from typing import cast
 
 from time import sleep
 
@@ -49,10 +44,16 @@ class Authenticator(dns_common.DNSAuthenticator):
             }
         )
 
+    def _get_credentials(self) -> CredentialsConfiguration:
+        if self.credentials is None:  # pragma: no cover
+            raise errors.Error("Plugin has not been prepared.")
+        return self.credentials
+
     def _perform(self, domain: str, validation_name: str, validation: str) -> None:
-        username = self.credentials.conf("username")
-        password = self.credentials.conf("password")
-        totp_secret = self.credentials.conf("totp_secret")
+        credentials = self._get_credentials()
+        username = cast(str, credentials.conf("username"))
+        password = cast(str, credentials.conf("password"))
+        totp_secret = cast(str, credentials.conf("totp_secret"))
         
         tries = 3
         while True:
@@ -77,9 +78,10 @@ class Authenticator(dns_common.DNSAuthenticator):
                 r.raise_for_status()
         
     def _cleanup(self, domain: str, validation_name: str, validation: str) -> None:
-        username = self.credentials.conf("username")
-        password = self.credentials.conf("password")
-        totp_secret = self.credentials.conf("totp_secret")
+        credentials = self._get_credentials()
+        username = cast(str, credentials.conf("username"))
+        password = cast(str, credentials.conf("password"))
+        totp_secret = cast(str, credentials.conf("totp_secret"))
         
         tries = 3
         while True:

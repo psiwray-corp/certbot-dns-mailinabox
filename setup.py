@@ -4,7 +4,7 @@ setup(
     name="certbot-dns-mailinabox",
     version="0.1.0",
     description="Mail-in-a-Box's DNS authenticator.",
-    package="certbot_dns_mailinabox.py",
+    py_modules=["certbot_dns_mailinabox"],
     install_requires=[
         "certbot",
         "pyotp",
